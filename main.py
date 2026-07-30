@@ -221,15 +221,34 @@ def draw_animated_map(data: pd.DataFrame, geojson: dict):
         "연도: %{customdata[2]}년<br>"
         "고령화율: %{customdata[1]:.1f}%<extra></extra>"
     )
+
+    # 범주형 색상은 연도마다 트레이스 수가 달라져 애니메이션 중 일부 지역이
+    # 사라질 수 있습니다. 하나의 숫자 트레이스를 쓰되 경계에서 색을 끊어
+    # 겉보기에는 정확히 다섯 단계가 되도록 색상표를 만듭니다.
+    color_max = max(45.0, float(np.ceil(data["고령화율"].max())))
+    boundaries = [19 / color_max, 23 / color_max, 28 / color_max, 38 / color_max]
+    colors = [RATE_COLORS[label] for label in RATE_LABELS]
+    step_color_scale = [
+        [0.0, colors[0]],
+        [boundaries[0], colors[0]],
+        [boundaries[0], colors[1]],
+        [boundaries[1], colors[1]],
+        [boundaries[1], colors[2]],
+        [boundaries[2], colors[2]],
+        [boundaries[2], colors[3]],
+        [boundaries[3], colors[3]],
+        [boundaries[3], colors[4]],
+        [1.0, colors[4]],
+    ]
     figure = px.choropleth(
         data.sort_values("연도"),
         geojson=geojson,
         locations="시군구코드",
         featureidkey="properties.코드",
-        color="고령화 단계",
+        color="고령화율",
         animation_frame="연도",
-        category_orders={"고령화 단계": RATE_LABELS},
-        color_discrete_map=RATE_COLORS,
+        color_continuous_scale=step_color_scale,
+        range_color=(0, color_max),
         custom_data=["시도", "고령화율", "연도"],
     )
     figure.update_traces(
@@ -249,8 +268,13 @@ def draw_animated_map(data: pd.DataFrame, geojson: dict):
     figure.update_layout(
         height=800,
         margin=dict(l=0, r=0, t=10, b=0),
-        legend_title_text="고령화율 구간",
-        legend=dict(orientation="v", x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.88)"),
+        coloraxis_colorbar=dict(
+            title="고령화율 구간",
+            tickmode="array",
+            tickvals=[9.5, 21, 25.5, 33, (38 + color_max) / 2],
+            ticktext=RATE_LABELS,
+            len=0.55,
+        ),
         paper_bgcolor="white",
     )
 
@@ -282,6 +306,40 @@ try:
         population_data = load_population()
         boundary_data = load_boundaries()
         sigungu_data, yearly_data, year = make_sigungu_data(population_data, boundary_data)
+
+    # 화면이 복잡해지지 않도록 핵심 요약 정보는 사이드바에도 모아 보여 줍니다.
+    valid_sigungu = sigungu_data.dropna(subset=["고령화율"])
+    highest_area = valid_sigungu.loc[valid_sigungu["고령화율"].idxmax()]
+    lowest_area = valid_sigungu.loc[valid_sigungu["고령화율"].idxmin()]
+    jeju_area = valid_sigungu.loc[
+        valid_sigungu["시도"].eq("제주특별자치도")
+        & valid_sigungu["시군구"].eq("제주시")
+    ]
+
+    with st.sidebar:
+        st.header("지도 정보")
+        st.metric("기준 연도", f"{year}년")
+        st.caption("고령화율 = 65세 이상 인구 ÷ 전체 인구 × 100")
+        st.divider()
+        st.subheader("시군구 요약")
+        st.metric(
+            "고령화율 최고",
+            f"{highest_area['고령화율']:.1f}%",
+            help=f"{highest_area['시도']} {highest_area['시군구']}",
+        )
+        st.caption(f"{highest_area['시도']} {highest_area['시군구']}")
+        st.metric(
+            "고령화율 최저",
+            f"{lowest_area['고령화율']:.1f}%",
+            help=f"{lowest_area['시도']} {lowest_area['시군구']}",
+        )
+        st.caption(f"{lowest_area['시도']} {lowest_area['시군구']}")
+        if not jeju_area.empty:
+            jeju_area = jeju_area.iloc[0]
+            st.metric("제주특별자치도 제주시", f"{jeju_area['고령화율']:.1f}%")
+        st.divider()
+        st.subheader("애니메이션 안내")
+        st.caption("애니메이션은 17개 시도 기준입니다. 재생 버튼이나 연도 슬라이더로 변화를 확인하세요.")
 
     st.caption(f"{year}년 기준 · 고령화율 = 65세 이상 인구 ÷ 전체 인구 × 100")
     latest_tab, animation_tab = st.tabs([f"{year}년 시군구 지도", "연도별 시도 변화 애니메이션"])
