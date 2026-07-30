@@ -101,19 +101,49 @@ def make_sigungu_data(
             "시도": [feature["properties"]["시도"] for feature in geojson["features"]],
         }
     )
-    # 모든 연도에 255개 경계를 붙여 연도별 지도의 지역 수를 일정하게 유지합니다.
-    year_table = pd.DataFrame({"연도": sorted(grouped["연도"].unique())})
-    yearly_result = year_table.merge(areas, how="cross").merge(
-        grouped, on=["연도", "시군구코드"], how="left"
+    latest_result = areas.merge(
+        grouped.loc[grouped["연도"].eq(latest_year)].drop(columns="연도"),
+        on="시군구코드",
+        how="left",
     )
-    yearly_result["고령화 단계"] = pd.cut(
-        yearly_result["고령화율"],
+    latest_result["고령화 단계"] = pd.cut(
+        latest_result["고령화율"],
         bins=[-np.inf, 19, 23, 28, 38, np.inf],
         labels=RATE_LABELS,
         right=False,
     )
-    latest_result = yearly_result.loc[yearly_result["연도"].eq(latest_year)].copy()
-    return latest_result, yearly_result, latest_year
+
+    # 애니메이션은 시도별로 합산합니다. 시군구가 분리·통합되어 코드가 바뀌어도
+    # 시도 전체 인구에는 빠짐없이 포함되므로 과거 연도의 빈칸을 없앨 수 있습니다.
+    population["시도_현재명"] = population["시도"].replace(
+        {
+            "강원도": "강원특별자치도",
+            "전라북도": "전북특별자치도",
+        }
+    )
+    province_grouped = population.groupby(["연도", "시도_현재명"], as_index=False)[
+        ["전체인구", "고령인구"]
+    ].sum()
+    province_grouped["고령화율"] = np.where(
+        province_grouped["전체인구"] > 0,
+        province_grouped["고령인구"] / province_grouped["전체인구"] * 100,
+        np.nan,
+    )
+
+    # 현재 시군구 경계 각각에 해당 시도의 동일한 값을 넣어 시도 전체를 칠합니다.
+    animation_result = areas.merge(
+        province_grouped,
+        left_on="시도",
+        right_on="시도_현재명",
+        how="left",
+    ).drop(columns="시도_현재명")
+    animation_result["고령화 단계"] = pd.cut(
+        animation_result["고령화율"],
+        bins=[-np.inf, 19, 23, 28, 38, np.inf],
+        labels=RATE_LABELS,
+        right=False,
+    )
+    return latest_result, animation_result, latest_year
 
 
 def draw_map(data: pd.DataFrame, geojson: dict):
@@ -185,12 +215,11 @@ def draw_map(data: pd.DataFrame, geojson: dict):
 
 
 def draw_animated_map(data: pd.DataFrame, geojson: dict):
-    """연도 슬라이더와 재생 버튼이 있는 고령화율 변화 지도를 만듭니다."""
+    """연도 슬라이더와 재생 버튼이 있는 시도별 고령화율 지도를 만듭니다."""
     hover_template = (
         "<b>%{customdata[0]}</b><br>"
-        "시도: %{customdata[1]}<br>"
-        "연도: %{customdata[3]}년<br>"
-        "고령화율: %{customdata[2]:.1f}%<extra></extra>"
+        "연도: %{customdata[2]}년<br>"
+        "고령화율: %{customdata[1]:.1f}%<extra></extra>"
     )
     figure = px.choropleth(
         data.sort_values("연도"),
@@ -201,7 +230,7 @@ def draw_animated_map(data: pd.DataFrame, geojson: dict):
         animation_frame="연도",
         category_orders={"고령화 단계": RATE_LABELS},
         color_discrete_map=RATE_COLORS,
-        custom_data=["시군구", "시도", "고령화율", "연도"],
+        custom_data=["시도", "고령화율", "연도"],
     )
     figure.update_traces(
         marker_line_color="#777777",
@@ -255,11 +284,11 @@ try:
         sigungu_data, yearly_data, year = make_sigungu_data(population_data, boundary_data)
 
     st.caption(f"{year}년 기준 · 고령화율 = 65세 이상 인구 ÷ 전체 인구 × 100")
-    latest_tab, animation_tab = st.tabs([f"{year}년 지도", "연도별 변화 애니메이션"])
+    latest_tab, animation_tab = st.tabs([f"{year}년 시군구 지도", "연도별 시도 변화 애니메이션"])
     with latest_tab:
         st.plotly_chart(draw_map(sigungu_data, boundary_data), use_container_width=True)
     with animation_tab:
-        st.caption("재생 버튼을 누르거나 아래 연도 슬라이더를 움직여 변화를 확인하세요.")
+        st.caption("17개 시도 기준입니다. 재생 버튼을 누르거나 연도 슬라이더를 움직여 보세요.")
         st.plotly_chart(draw_animated_map(yearly_data, boundary_data), use_container_width=True)
 
     st.subheader("시군구 고령화율 순위")
