@@ -4,6 +4,7 @@ import re
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -126,6 +127,31 @@ def draw_map(data: pd.DataFrame, geojson: dict):
             "고령화율: %{customdata[2]:.1f}%<extra></extra>"
         ),
     )
+
+    # 실제 위치를 추가로 찍지 않고, 최고·최저 지역 정보를 범례 항목으로만 보여 줍니다.
+    valid_data = data.dropna(subset=["고령화율"])
+    if not valid_data.empty:
+        highest = valid_data.loc[valid_data["고령화율"].idxmax()]
+        lowest = valid_data.loc[valid_data["고령화율"].idxmin()]
+        for label, area, color in [
+            ("최고", highest, RATE_COLORS["38% 이상"]),
+            ("최저", lowest, RATE_COLORS["19% 미만"]),
+        ]:
+            figure.add_trace(
+                go.Scattergeo(
+                    lon=[None],
+                    lat=[None],
+                    mode="markers",
+                    marker=dict(size=10, color=color, line=dict(color="#555555", width=0.5)),
+                    name=(
+                        f"{label}: {area['시도']} {area['시군구']} "
+                        f"({area['고령화율']:.1f}%)"
+                    ),
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
+
     figure.update_geos(fitbounds="locations", visible=False)
     figure.update_layout(
         height=760,
