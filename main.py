@@ -52,15 +52,18 @@ def load_boundaries() -> dict:
     return geojson
 
 
-def make_sigungu_data(population: pd.DataFrame, geojson: dict) -> tuple[pd.DataFrame, int]:
-    """최신 연도의 읍면동 인구를 시군구별로 합쳐 고령화율을 계산합니다."""
+def make_sigungu_data(
+    population: pd.DataFrame, geojson: dict
+) -> tuple[pd.DataFrame, pd.DataFrame, int]:
+    """모든 연도의 읍면동 인구를 시군구별로 합쳐 고령화율을 계산합니다."""
     # 연도에 문자열이 섞여 있어도 비교할 수 있도록 숫자로 바꿉니다.
     years = pd.to_numeric(population["연도"], errors="coerce")
     latest_year = int(years.max())
-    latest = population.loc[years.eq(latest_year)].copy()
+    population = population.loc[years.notna()].copy()
+    population["연도"] = years.loc[years.notna()].astype(int)
 
     # '계_65세'부터 '계_100세 이상'까지가 65세 이상 인구입니다.
-    total_columns = [column for column in latest.columns if column.startswith("계_")]
+    total_columns = [column for column in population.columns if column.startswith("계_")]
 
     def age_of(column: str) -> int | None:
         match = re.fullmatch(r"계_(\d+)세(?: 이상)?", column)
@@ -74,14 +77,16 @@ def make_sigungu_data(population: pd.DataFrame, geojson: dict) -> tuple[pd.DataF
         raise ValueError("나이별 인구 열을 찾지 못했습니다.")
 
     # 빈칸이나 쉼표가 들어간 값도 안전하게 숫자로 바꿉니다.
-    numeric = latest[total_columns].replace(",", "", regex=True).apply(
+    numeric = population[total_columns].replace(",", "", regex=True).apply(
         pd.to_numeric, errors="coerce"
     ).fillna(0)
-    latest["전체인구"] = numeric.sum(axis=1)
-    latest["고령인구"] = numeric[senior_columns].sum(axis=1)
-    latest["시군구코드"] = latest["코드"].astype("string").str.zfill(10).str[:5]
+    population["전체인구"] = numeric.sum(axis=1)
+    population["고령인구"] = numeric[senior_columns].sum(axis=1)
+    population["시군구코드"] = population["코드"].astype("string").str.zfill(10).str[:5]
 
-    grouped = latest.groupby("시군구코드", as_index=False)[["전체인구", "고령인구"]].sum()
+    grouped = population.groupby(["연도", "시군구코드"], as_index=False)[
+        ["전체인구", "고령인구"]
+    ].sum()
     grouped["고령화율"] = np.where(
         grouped["전체인구"] > 0,
         grouped["고령인구"] / grouped["전체인구"] * 100,
@@ -96,14 +101,19 @@ def make_sigungu_data(population: pd.DataFrame, geojson: dict) -> tuple[pd.DataF
             "시도": [feature["properties"]["시도"] for feature in geojson["features"]],
         }
     )
-    result = areas.merge(grouped, on="시군구코드", how="left")
-    result["고령화 단계"] = pd.cut(
-        result["고령화율"],
+    # 모든 연도에 255개 경계를 붙여 연도별 지도의 지역 수를 일정하게 유지합니다.
+    year_table = pd.DataFrame({"연도": sorted(grouped["연도"].unique())})
+    yearly_result = year_table.merge(areas, how="cross").merge(
+        grouped, on=["연도", "시군구코드"], how="left"
+    )
+    yearly_result["고령화 단계"] = pd.cut(
+        yearly_result["고령화율"],
         bins=[-np.inf, 19, 23, 28, 38, np.inf],
         labels=RATE_LABELS,
         right=False,
     )
-    return result, latest_year
+    latest_result = yearly_result.loc[yearly_result["연도"].eq(latest_year)].copy()
+    return latest_result, yearly_result, latest_year
 
 
 def draw_map(data: pd.DataFrame, geojson: dict):
@@ -133,10 +143,21 @@ def draw_map(data: pd.DataFrame, geojson: dict):
     if not valid_data.empty:
         highest = valid_data.loc[valid_data["고령화율"].idxmax()]
         lowest = valid_data.loc[valid_data["고령화율"].idxmin()]
-        for label, area, color in [
+        legend_areas = [
             ("최고", highest, RATE_COLORS["38% 이상"]),
             ("최저", lowest, RATE_COLORS["19% 미만"]),
-        ]:
+        ]
+
+        jeju_city = valid_data.loc[
+            valid_data["시도"].eq("제주특별자치도") & valid_data["시군구"].eq("제주시")
+        ]
+        if not jeju_city.empty:
+            jeju_city = jeju_city.iloc[0]
+            legend_areas.append(
+                ("제주시", jeju_city, RATE_COLORS[str(jeju_city["고령화 단계"])])
+            )
+
+        for label, area, color in legend_areas:
             figure.add_trace(
                 go.Scattergeo(
                     lon=[None],
@@ -163,6 +184,55 @@ def draw_map(data: pd.DataFrame, geojson: dict):
     return figure
 
 
+def draw_animated_map(data: pd.DataFrame, geojson: dict):
+    """연도 슬라이더와 재생 버튼이 있는 고령화율 변화 지도를 만듭니다."""
+    hover_template = (
+        "<b>%{customdata[0]}</b><br>"
+        "시도: %{customdata[1]}<br>"
+        "연도: %{customdata[3]}년<br>"
+        "고령화율: %{customdata[2]:.1f}%<extra></extra>"
+    )
+    figure = px.choropleth(
+        data.sort_values("연도"),
+        geojson=geojson,
+        locations="시군구코드",
+        featureidkey="properties.코드",
+        color="고령화 단계",
+        animation_frame="연도",
+        category_orders={"고령화 단계": RATE_LABELS},
+        color_discrete_map=RATE_COLORS,
+        custom_data=["시군구", "시도", "고령화율", "연도"],
+    )
+    figure.update_traces(
+        marker_line_color="#777777",
+        marker_line_width=0.45,
+        hovertemplate=hover_template,
+    )
+    # 애니메이션의 각 연도 프레임에도 같은 경계선과 설명 형식을 적용합니다.
+    for frame in figure.frames:
+        for trace in frame.data:
+            trace.update(
+                marker_line_color="#777777",
+                marker_line_width=0.45,
+                hovertemplate=hover_template,
+            )
+    figure.update_geos(fitbounds="locations", visible=False)
+    figure.update_layout(
+        height=800,
+        margin=dict(l=0, r=0, t=10, b=0),
+        legend_title_text="고령화율 구간",
+        legend=dict(orientation="v", x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.88)"),
+        paper_bgcolor="white",
+    )
+
+    # 재생 속도를 너무 빠르지 않게 조정해 연도별 변화를 알아보기 쉽게 합니다.
+    if figure.layout.updatemenus:
+        play_button = figure.layout.updatemenus[0].buttons[0]
+        play_button.args[1]["frame"]["duration"] = 800
+        play_button.args[1]["transition"]["duration"] = 300
+    return figure
+
+
 def ranking_table(data: pd.DataFrame, ascending: bool) -> pd.DataFrame:
     """고령화율 상위 또는 하위 10곳을 보기 좋은 표로 만듭니다."""
     ranked = (
@@ -182,10 +252,15 @@ try:
     with st.spinner("최신 인구와 지도 경계를 불러오는 중입니다..."):
         population_data = load_population()
         boundary_data = load_boundaries()
-        sigungu_data, year = make_sigungu_data(population_data, boundary_data)
+        sigungu_data, yearly_data, year = make_sigungu_data(population_data, boundary_data)
 
     st.caption(f"{year}년 기준 · 고령화율 = 65세 이상 인구 ÷ 전체 인구 × 100")
-    st.plotly_chart(draw_map(sigungu_data, boundary_data), use_container_width=True)
+    latest_tab, animation_tab = st.tabs([f"{year}년 지도", "연도별 변화 애니메이션"])
+    with latest_tab:
+        st.plotly_chart(draw_map(sigungu_data, boundary_data), use_container_width=True)
+    with animation_tab:
+        st.caption("재생 버튼을 누르거나 아래 연도 슬라이더를 움직여 변화를 확인하세요.")
+        st.plotly_chart(draw_animated_map(yearly_data, boundary_data), use_container_width=True)
 
     st.subheader("시군구 고령화율 순위")
     high_column, low_column = st.columns(2)
