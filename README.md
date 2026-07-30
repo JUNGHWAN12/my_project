@@ -20,3 +20,6 @@ streamlit run main.py
 ## Streamlit Community Cloud 배포
 
 저장소를 연결한 뒤 Main file path를 `main.py`로 지정합니다.
+
+## geojson url
+https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson
